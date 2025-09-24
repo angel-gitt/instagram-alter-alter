@@ -11,9 +11,68 @@ import duckdb
 import pandas as pd
 from bs4 import BeautifulSoup
 from camoufox.sync_api import Camoufox
+from tqdm import tqdm
 
 BASE_URL = "https://www.instagram.com"
 COMPACT_NUMBER_RE = re.compile(r'^([\d.,\s]+)([KMB]?)$', re.IGNORECASE)
+FEEDBACK_CONFIRM_TEXTS = (
+    "Aceptar",
+    "Accept",
+    "OK",
+    "Ok",
+    "Okay",
+    "Entendido",
+    "Got it",
+    "Continue",
+    "Continuar",
+    "Allow",
+)
+
+def dismiss_feedback_required_modal(page, max_wait_ms: int = 6000) -> bool:
+    """Click the confirmation button shown when Instagram throttles the followers list."""
+    deadline = time.time() + max_wait_ms / 1000
+    selectors = [
+        'div[role="dialog"]',
+        'div[role="alertdialog"]',
+    ]
+    xpath_selector = "xpath=/html/body/div[5]/div[1]/div/div[2]/div/div/div/div/div[2]/div/div/div[2]/button[2]"
+    while time.time() < deadline:
+        try:
+            xpath_button = page.locator(xpath_selector)
+            if xpath_button.count() > 0:
+                print("   ⚠️ Feedback modal detectado, aceptando para continuar…")
+                xpath_button.first.click()
+                page.wait_for_timeout(1500)
+                return True
+        except Exception:
+            pass
+        for container_selector in selectors:
+            try:
+                container = page.locator(container_selector)
+            except Exception:
+                continue
+            try:
+                if container.count() == 0:
+                    continue
+            except Exception:
+                continue
+            for text_value in FEEDBACK_CONFIRM_TEXTS:
+                button_selector = f'{container_selector} button:has-text("{text_value}")'
+                role_button_selector = f'{container_selector} [role="button"]:has-text("{text_value}")'
+                for target_selector in (button_selector, role_button_selector):
+                    try:
+                        target = page.locator(target_selector)
+                        if target.count() > 0:
+                            print("  2 ⚠️ Feedback modal detectado, aceptando para continuar…")
+                            target.first.click()
+                            page.wait_for_timeout(1500)
+                            return True
+                    except Exception:
+                        continue
+        page.wait_for_timeout(5)
+    return False
+
+
 
 
 def parse_compact_number(value: str) -> int:
@@ -86,45 +145,67 @@ def load_profiles_from_csv(csv_path: str) -> list[str]:
     return sorted(set(profile_urls))
 
 
-def scroll_until_end(page, delay: float = 2.5, max_idle: int = 6, max_rounds: int = 250) -> None:
+def scroll_until_end(page, delay: float = 2.5, max_idle: int = 6, max_rounds: int = 250, expected_total: int | None = None) -> None:
     page.wait_for_selector('div[role="dialog"]', timeout=10000)
+    dismiss_feedback_required_modal(page)
+    bar = None
+    if expected_total and expected_total > 0:
+        bar = tqdm(total=expected_total, desc='Followed', unit='profiles', leave=False)
+    seen_count = 0
     idle_rounds = 0
     prev_height = 0
     prev_count = 0
     rounds = 0
-    while idle_rounds < max_idle and rounds < max_rounds:
-        rounds += 1
-        anchors = page.locator('div[role="dialog"] a[role="link"]')
-        try:
-            count_before = anchors.count()
-        except Exception:
-            count_before = 0
-        if count_before == 0:
-            break
-        try:
-            anchors.last.scroll_into_view_if_needed()
-        except Exception:
-            pass
-        page.wait_for_timeout(int(delay * 1000))
-        current_height = page.evaluate(
-            """() => {
-                const modal = document.querySelector('div[role=\"dialog\"]');
-                if (!modal) return 0;
-                return modal.scrollHeight || modal.offsetHeight || 0;
-            }"""
-        )
-        try:
-            count_after = anchors.count()
-        except Exception:
-            count_after = count_before
-        if current_height == prev_height and count_after == prev_count:
-            idle_rounds += 1
-        else:
-            idle_rounds = 0
-            prev_height = current_height
-            prev_count = count_after
-        if rounds % 10 == 0:
+    try:
+        while idle_rounds < max_idle and rounds < max_rounds:
+            rounds += 1
+            dismiss_feedback_required_modal(page, max_wait_ms=2500)
+            anchors = page.locator('div[role="dialog"] a[role="link"]')
+            try:
+                count_before = anchors.count()
+            except Exception:
+                count_before = 0
+            if count_before == 0:
+                break
+            try:
+                anchors.last.scroll_into_view_if_needed()
+            except Exception:
+                pass
             page.wait_for_timeout(int(delay * 1000))
+            current_height = page.evaluate(
+                """() => {
+                    const modal = document.querySelector('div[role=\"dialog\"]');
+                    if (!modal) return 0;
+                    return modal.scrollHeight || modal.offsetHeight || 0;
+                }"""
+            )
+            try:
+                count_after = anchors.count()
+            except Exception:
+                count_after = count_before
+            if bar:
+                new_seen = max(seen_count, count_after)
+                increment = new_seen - seen_count
+                if increment > 0:
+                    if bar.total is not None:
+                        remaining = max(0, bar.total - bar.n)
+                        if increment > remaining:
+                            increment = remaining
+                    if increment > 0:
+                        bar.update(increment)
+                seen_count = new_seen
+            if current_height == prev_height and count_after == prev_count:
+                idle_rounds += 1
+            else:
+                idle_rounds = 0
+                prev_height = current_height
+                prev_count = count_after
+            if rounds % 10 == 0:
+                page.wait_for_timeout(int(delay * 1000))
+    finally:
+        if bar:
+            bar.close()
+
 
 
 def extract_following(page) -> tuple[list[dict], str]:
@@ -298,22 +379,9 @@ def visit_and_extract(profile_url: str, browser, db_name: str, session_storage_f
         following_count = get_following_count(page, username)
         modal_open = open_following_modal(page, username)
         if modal_open:
-            scroll_until_end(page)
+            dismiss_feedback_required_modal(page)
+            scroll_until_end(page, expected_total=following_count)
             following, dom_html = extract_following(page)
-            attempts = 0
-            while (
-                following_count
-                and len(following) < following_count
-                and attempts < 3
-            ):
-                extra_delay = 3.0 + attempts
-                scroll_until_end(page, delay=extra_delay, max_idle=10, max_rounds=400)
-                updated_following, dom_html = extract_following(page)
-                if len(updated_following) <= len(following):
-                    attempts += 1
-                else:
-                    following = updated_following
-                    attempts = 0
             print(f"   Seguimientos guardados: {len(following)} / declarados {following_count}")
         else:
             following = []

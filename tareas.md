@@ -1,4 +1,2 @@
-Tratar el string del número de seguidos propiamente (mil. etc)
-Pasar el esquema de output para que sea igual que el de facebook
-Pasar los enlaces con la uri a enlaces reales (instagram.com/xyz)
-Extraer el "nombre" (lo que sale en gris debajo del usuario) como name
+Verificar que los names se estén guardando correctamente
+Manejar el tema de la limitación de visualización de seguidos (cuando sale la ventana y se acepta, lo que enseña son sugerencias, no los seguidores reales, esto se detecta porque saca muchos más seguidos de los declarados cuando estos son bajos, ej 42/12). Cuando salga la ventana hay que parar durante un tiempo largo, también probar a hacer el scroll un poco más despacio. 
